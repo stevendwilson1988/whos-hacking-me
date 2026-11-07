@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.bak-*
+*.db
+*.db-shm
+*.db-wal
+*.mmdb
+.env
+.env.*
+.DS_Store
