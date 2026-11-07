@@ -129,6 +129,25 @@ def main():
         check("countries are top 6 plus Other at most", len(places) <= 7)
         check("country total matches the Yes total", seven["countries"]["total"] == seven["how"]["total"])
 
+        for label, data, step, sizes in (("24h", day, "hour", (24, 25)), ("7d", seven, "hour", (168, 169)),
+                                         ("all", allt, "day", None)):
+            t = data["timeline"]
+            pts = t["points"]
+            how_w = {s["label"]: s["count"] for s in data["how"]["slices"]}
+            check(f"timeline {label} uses {step} steps", t["step"] == step)
+            if sizes:
+                check(f"timeline {label} has {sizes[0]}-{sizes[1]} points", sizes[0] <= len(pts) <= sizes[1])
+            check(f"timeline {label} SSH sums to chart 1", sum(p["ssh"] for p in pts) == how_w.get("SSH", 0))
+            check(f"timeline {label} web sums to chart 1", sum(p["web"] for p in pts) == how_w.get("Web (HTTP)", 0))
+            gap = timedelta(hours=1) if step == "hour" else timedelta(days=1)
+            times = [datetime.fromisoformat(p["t"]) for p in pts]
+            check(f"timeline {label} is in order with no gaps", all(b - a == gap for a, b in zip(times, times[1:])))
+            check(f"timeline {label} has only counts", all(set(p) == {"t", "ssh", "web"} for p in pts))
+        check("timeline all time keeps the 100-hour-old rows",
+              sum(p["ssh"] for p in allt["timeline"]["points"]) - sum(p["ssh"] for p in day["timeline"]["points"]) == 30)
+        check("timeline skips rows not marked Yes and the owner's",
+              sum(p["web"] for p in seven["timeline"]["points"]) == how["Web (HTTP)"] and "mineonly" not in json.dumps(seven["timeline"]))
+
         check("bad window is refused", client.get("/whos-hacking-me/api/charts?window=x").status_code == 400)
 
         with app.connect() as db:

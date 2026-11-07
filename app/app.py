@@ -46,6 +46,8 @@ SSH_PUBLIC_AFTER = "Logging in over SSH"
 
 # Chart windows in days; None means all time.
 CHART_WINDOWS = {"24h": 1, "7d": 7, "all": None}
+# Point size for the over-time chart in each window.
+CHART_STEPS = {"24h": "hour", "7d": "hour", "all": "day"}
 CHART_CACHE_SECONDS = 60
 TOP_CATEGORIES = 6
 TOP_USERNAMES = 8
@@ -508,7 +510,36 @@ def round_down(n):
     return n // scale * scale
 
 
-def chart_data(db, since, names_before):
+def timeline(db, since, now, step):
+    """SSH and web attempts per hour or day, with empty buckets filled in as zero.
+    Same rows as the "how" chart, so the totals always match it."""
+    width, delta = (13, timedelta(hours=1)) if step == "hour" else (10, timedelta(days=1))
+    rows = db.execute(
+        "SELECT substr(ts, 1, :n) AS bucket, SUM(status = :ssh) AS ssh, SUM(status != :ssh) AS web "
+        "FROM public_visits WHERE hacking_me = 'Yes' AND ts >= :since GROUP BY bucket",
+        {"n": width, "ssh": SSH_STATUS, "since": since},
+    ).fetchall()
+    counts = {r["bucket"]: (r["ssh"], r["web"]) for r in rows}
+
+    def floor(moment):
+        moment = moment.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        return moment if step == "hour" else moment.replace(hour=0)
+
+    if since:
+        start = floor(datetime.fromisoformat(since))
+    elif counts:
+        start = floor(datetime.fromisoformat(min(counts) + ("" if step == "hour" else "T00") + ":00+00:00"))
+    else:
+        start = floor(now)
+    points, moment, end = [], start, floor(now)
+    while moment <= end:
+        ssh, web = counts.get(moment.isoformat()[:width], (0, 0))
+        points.append({"t": moment.isoformat(), "ssh": ssh, "web": web})
+        moment += delta
+    return {"step": step, "points": points}
+
+
+def chart_data(db, since, names_before, now, step):
     """All charts for one window. Only usernames read past the public view."""
     routes = db.execute(
         "SELECT status = ? AS ssh, COUNT(*) AS count FROM public_visits "
@@ -577,6 +608,7 @@ def chart_data(db, since, names_before):
     return {
         "how": {"slices": how, "total": sum(r["count"] for r in routes)},
         "categories": {"slices": slices, "total": sum(r["count"] for r in categories)},
+        "timeline": timeline(db, since, now, step),
         "countries": {"slices": countries, "total": sum(c["count"] for c in countries)},
         "usernames": {
             "slices": username_slices,
@@ -605,7 +637,7 @@ def charts():
         now = datetime.now(timezone.utc).replace(microsecond=0)
         since = (now - timedelta(days=days)).isoformat() if days else ""
         with connect() as db:
-            data = chart_data(db, since, (now - USERNAME_DELAY).isoformat())
+            data = chart_data(db, since, (now - USERNAME_DELAY).isoformat(), now, CHART_STEPS[window])
         chart_cache[window] = (time.monotonic(), data)
     return jsonify(data)
 

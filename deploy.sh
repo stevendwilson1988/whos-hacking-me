@@ -9,6 +9,7 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 
 changed=0
 for f in "$SRC"/*; do
+  [[ -f "$f" ]] || continue   # skip __pycache__ and other folders
   name=$(basename "$f")
   if [[ -f "$DEST/$name" ]] && cmp -s "$f" "$DEST/$name"; then
     continue

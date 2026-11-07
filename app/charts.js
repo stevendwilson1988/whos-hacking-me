@@ -6,7 +6,7 @@
   const token = name => css.getPropertyValue(name).trim();
   const INK = token("--ink"), MUTED = token("--muted"), PANEL = token("--panel");
   const SLOTS = [1, 2, 3, 4, 5, 6, 7, 8].map(n => token("--series-" + n));
-  const OTHER = token("--other");
+  const OTHER = token("--other"), LINE = token("--line");
 
   // A category keeps its color across windows, whatever its rank.
   const CATEGORY_COLORS = {
@@ -33,6 +33,16 @@
   const num = n => n.toLocaleString();
   const quiet = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+  const FONT = { family: "Nunito, system-ui, sans-serif", size: 13 };
+  const LEGEND = {
+    position: "bottom",
+    labels: { color: INK, boxWidth: 12, boxHeight: 12, padding: 10, font: FONT }
+  };
+  const TOOLTIP = {
+    backgroundColor: token("--bg"), titleColor: INK, bodyColor: INK,
+    borderColor: MUTED, borderWidth: 1, padding: 10
+  };
+
   // Labels only ever reach the canvas, where they are drawn as text and can't become HTML.
   function makeChart(id) {
     return new Chart($(id), {
@@ -43,13 +53,9 @@
         cutout: "60%",
         animation: quiet ? false : { duration: 500 },
         plugins: {
-          legend: {
-            position: "bottom",
-            labels: { color: INK, boxWidth: 12, boxHeight: 12, padding: 10, font: { family: "Nunito, system-ui, sans-serif", size: 13 } }
-          },
+          legend: LEGEND,
           tooltip: {
-            backgroundColor: token("--bg"), titleColor: INK, bodyColor: INK,
-            borderColor: MUTED, borderWidth: 1, padding: 10,
+            ...TOOLTIP,
             callbacks: {
               title: items => items[0].chart.fullLabels[items[0].dataIndex],
               label: item => {
@@ -61,6 +67,67 @@
         }
       }
     });
+  }
+
+  function makeLineChart(id) {
+    const line = (label, color) => ({
+      label, data: [], borderColor: color, backgroundColor: color,
+      borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, cubicInterpolationMode: "monotone"
+    });
+    const axis = { color: MUTED, font: FONT };
+    return new Chart($(id), {
+      type: "line",
+      data: { labels: [], datasets: [line("SSH", ROUTE_COLORS["SSH"]), line("Web (HTTP)", ROUTE_COLORS["Web (HTTP)"])] },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        animation: quiet ? false : { duration: 500 },
+        interaction: { mode: "index", intersect: false },
+        scales: {
+          x: { ticks: { ...axis, autoSkip: true, maxTicksLimit: 8, maxRotation: 0 }, grid: { color: LINE } },
+          y: { beginAtZero: true, ticks: { ...axis, precision: 0, callback: v => num(v) }, grid: { color: LINE } }
+        },
+        plugins: {
+          legend: LEGEND,
+          tooltip: {
+            ...TOOLTIP,
+            callbacks: {
+              title: items => items[0].chart.fullLabels[items[0].dataIndex],
+              label: item => " " + item.dataset.label + ": " + num(item.parsed.y)
+            }
+          }
+        }
+      }
+    });
+  }
+
+  // Bucket starts arrive in UTC; they're shown in the visitor's own time zone.
+  const TICK = {
+    "24h": { hour: "numeric" },
+    "7d": { weekday: "short", hour: "numeric" },
+    "all": { month: "short", day: "numeric" }
+  };
+  const FULL = {
+    hour: { weekday: "short", month: "short", day: "numeric", hour: "numeric" },
+    day: { weekday: "short", month: "short", day: "numeric", year: "numeric" }
+  };
+  const when = (t, opts) => new Date(t).toLocaleString(undefined, opts);
+
+  function drawTimeline(t) {
+    const points = t.points;
+    timeChart.fullLabels = points.map(p => when(p.t, FULL[t.step]));
+    timeChart.data.labels = points.map(p => when(p.t, TICK[current]));
+    timeChart.data.datasets[0].data = points.map(p => p.ssh);
+    timeChart.data.datasets[1].data = points.map(p => p.web);
+    timeChart.update();
+    const unit = t.step === "hour" ? "hour" : "day";
+    const ssh = points.reduce((a, p) => a + p.ssh, 0), web = points.reduce((a, p) => a + p.web, 0);
+    const busiest = points.reduce((best, p) => p.ssh + p.web > best.ssh + best.web ? p : best, points[0] || { ssh: 0, web: 0 });
+    const peak = busiest.ssh + busiest.web;
+    const peakText = peak
+      ? "Busiest " + unit + ": " + when(busiest.t, FULL[t.step]) + ", " + num(peak) + " attempts"
+      : "No attempts in this period.";
+    setCaption("time-total", [peakText, "Each point is one " + unit + ". SSH: " + num(ssh) + ", web: " + num(web) + "."]);
+    $("chart-time").setAttribute("aria-label", "SSH and web attempts over time, one point per " + unit + ". SSH total " + num(ssh) + ", web total " + num(web) + ". " + peakText);
   }
 
   function draw(chart, slices, colors, canvas, summary) {
@@ -83,6 +150,7 @@
     draw(howChart, how.slices, how.slices.map(s => ROUTE_COLORS[s.label]), $("chart-how"), "SSH and web attempts.");
     draw(catsChart, cats.slices, cats.slices.map(s => CATEGORY_COLORS[s.label] || OTHER), $("chart-cats"), "Web attempts by category.");
     draw(namesChart, names.slices, nameColors(names.slices.map(s => s.label)), $("chart-names"), "Fake names they use to log into scratchbuild.net.");
+    drawTimeline(d.timeline);
     draw(placesChart, places.slices, placeColors(places.slices.map(s => s.label)), $("chart-places"), "Attempts by country.");
     setCaption("how-total", how.total
       ? how.slices.map(s => s.label + ": " + num(s.count) + " (" + share(s.count, how.total) + ")")
@@ -120,6 +188,7 @@
     return;
   }
   const howChart = makeChart("chart-how"), catsChart = makeChart("chart-cats"), namesChart = makeChart("chart-names"), placesChart = makeChart("chart-places");
+  const timeChart = makeLineChart("chart-time");
 
   for (const btn of document.querySelectorAll("[data-window]")) {
     btn.addEventListener("click", () => {
