@@ -26,6 +26,7 @@ if [[ $changed -eq 0 ]]; then
 fi
 
 echo "Running tests..."
+python3 "$DEST/test_classify.py"
 python3 "$DEST/test_charts.py"
 
 echo "Restarting www-traffic..."

@@ -35,6 +35,14 @@ def auth_line(hours_ago, message):
     return f"{stamp(hours_ago)} host sshd[1]: {message}\n"
 
 
+def access_line(hours_ago, ip, request, status, agent):
+    moment = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+    return f'{ip} - - [{moment.strftime("%d/%b/%Y:%H:%M:%S +0000")}] "{request}" {status} 0 "-" "{agent}"\n'
+
+
+BROWSER = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/156.0 Safari/537.36"
+
+
 def main():
     results = []
 
@@ -60,12 +68,33 @@ def main():
             for path in (["/.env"] * 20 + ["/wp-login.php"] * 15 + ["/x.php"] * 10 + ["/mcp"] * 8
                          + ["/phpmyadmin/"] * 6 + ["/livewire/update"] * 5 + ["/remote/login"] * 4
                          + ["/robots.txt"] * 30 + ["/"] * 30 + ["/nothing-here"] * 30):
-                web.append((stamp(1), "45.2.2.2", "Somewhere", path, 404, *app.labels(path, 404, "45.2.2.2")))
-            web += [(stamp(1), "45.3.3.3", "Paris, Ile-de-France, France", "/.env", 404, *app.labels("/.env", 404, "45.3.3.3"))] * 25
-            web += [(stamp(1), "45.3.3.4", "Lyon, Rhone, France", "/.env", 404, *app.labels("/.env", 404, "45.3.3.4"))] * 5
-            web += [(stamp(1), "45.3.3.5", "Unknown", "/.env", 404, *app.labels("/.env", 404, "45.3.3.5"))] * 3
-            web += [(stamp(1), "45.3.3.6", "Berlin, Berlin, Germany", "/", 200, *app.labels("/", 200, "45.3.3.6"))] * 99
+                web.append((stamp(1), "45.2.2.2", "Somewhere", path, 404, "", "", *app.labels(path, 404, "45.2.2.2")))
+            web += [(stamp(1), "45.3.3.3", "Paris, Ile-de-France, France", "/.env", 404, "", "", *app.labels("/.env", 404, "45.3.3.3"))] * 25
+            web += [(stamp(1), "45.3.3.4", "Lyon, Rhone, France", "/.env", 404, "", "", *app.labels("/.env", 404, "45.3.3.4"))] * 5
+            web += [(stamp(1), "45.3.3.5", "Unknown", "/.env", 404, "", "", *app.labels("/.env", 404, "45.3.3.5"))] * 3
+            web += [(stamp(1), "45.3.3.6", "Berlin, Berlin, Germany", "/", 200, "", "", *app.labels("/", 200, "45.3.3.6"))] * 99
             app.add_visits(db, web)
+            # Through the real log parser: the attacker's harmless-looking requests come
+            # first and must still be relabelled once its attack arrives.
+            app.store(db, [access_line(1.5, "45.4.4.4", "GET /nothing HTTP/1.1", 404, "-"),
+                           access_line(1.5, "45.4.4.4", "GET / HTTP/1.1", 200, BROWSER)])
+            app.store(db, [access_line(1, "45.4.4.4", "GET /.env HTTP/1.1", 404, "-"),
+                           access_line(1, "45.4.4.5", "GET / HTTP/1.1", 200, "python-requests/2.34"),
+                           access_line(1, "45.4.4.6", "GET / HTTP/1.1", 200, BROWSER),
+                           access_line(1, "45.4.4.7", "POST / HTTP/1.1", 405, BROWSER),
+                           access_line(1, "45.4.4.8", "GET / HTTP/1.1", 200, "Mozilla/5.0 (compatible; GPTBot/1.2)"),
+                           access_line(1, "45.4.4.9", "GET /podcast HTTP/1.1", 200, "LinkedInBot/1.0")])
+            stored = {(r["ip"], r["path"]): (r["category"], r["method"], r["user_agent"])
+                      for r in db.execute("SELECT * FROM visits WHERE ip LIKE '45.4.4.%'")}
+        check("attacker's earlier 404 becomes a follow-up", stored[("45.4.4.4", "/nothing")][0] == "Scanner follow-up")
+        check("attacker's homepage hit becomes a follow-up", stored[("45.4.4.4", "/")][0] == "Scanner follow-up")
+        check("attack itself keeps its category", stored[("45.4.4.4", "/.env")][0] == "Secret harvesting")
+        check("method and agent are stored", stored[("45.4.4.6", "/")][1:] == ("GET", BROWSER))
+        check("a script on the homepage isn't a site visit", stored[("45.4.4.5", "/")][0] == "Automated script")
+        check("a browser on the homepage is a site visit", stored[("45.4.4.6", "/")][0] == "Site visit")
+        check("POST to the homepage is a probe", stored[("45.4.4.7", "/")][0] == "Unknown probe")
+        check("AI crawlers are named", stored[("45.4.4.8", "/")][0] == "AI crawler")
+        check("link previews are named", stored[("45.4.4.9", "/podcast")][0] == "Link preview")
         client = app.app.test_client()
 
         def post(path, body):
@@ -85,7 +114,8 @@ def main():
         cats = seven["categories"]
         cat_labels = [s["label"] for s in cats["slices"]]
         check("chart 2 excludes SSH entirely", "SSH login attempt" not in cat_labels)
-        check("chart 2 total equals web attempts", cats["total"] == how["Web (HTTP)"])
+        check("chart 2 leaves out scanner follow-ups", "Scanner follow-up" not in cat_labels)
+        check("chart 2 total equals web attempts less follow-ups", cats["total"] == how["Web (HTTP)"] - 2)
         check("chart 2 is top 6 plus Other", len(cat_labels) == 7 and cat_labels[-1] == "Other")
         check("chart 2 counts only Yes rows", not {"Unknown probe", "Search crawler", "Site visit"} & set(cat_labels))
 
@@ -113,6 +143,8 @@ def main():
         check("table SSH category has no username", {v["category"] for v in ssh_public} == {"SSH login attempt"})
         check("table SSH detail has no username", {v["after_what"] for v in ssh_public} == {"Logging in over SSH"})
         raw = json.dumps(rows)
+        check("table never shows user agents or methods", "python-requests" not in raw and "GPTBot" not in raw
+              and not any({"user_agent", "method"} & set(v) for v in rows["visits"]))
         check("table data never mentions a username", not any(x in raw for x in ("SSH: ", "Logging in as", REAL, "real account", "name01", "justnow", "oldname", "onerror")))
         check("real and fake attempts look identical in the table",
               len({(v["path"], v["category"], v["after_what"], v["result"], v["hacking_me"]) for v in ssh_public}) == 1)

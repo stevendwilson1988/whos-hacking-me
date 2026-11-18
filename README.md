@@ -12,6 +12,7 @@ server, with charts. It flags requests and failed SSH logins that look like hack
 | `app/page.html`, `app/page.js` | The page and its live-updating table |
 | `app/charts.js`, `app/chart.umd.js` | Charts (Chart.js is vendored, see `chart.LICENSE.md`) |
 | `app/test_charts.py` | Tests. They use a throwaway database but load `app.py` from `/opt/www-traffic` |
+| `app/test_classify.py` | Tests for the rules in `classify.py`, using real paths from the log |
 | `deploy/www-traffic.service` | systemd unit (`/etc/systemd/system/`) |
 | `deploy/nginx-limit.conf` | Rate limit zone (`/etc/nginx/conf.d/whos-hacking-me-limit.conf`) |
 | `deploy/nginx-locations.conf` | Reference copy of the location blocks in `/etc/nginx/sites-available/default` |

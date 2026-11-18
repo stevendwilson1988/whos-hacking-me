@@ -13,6 +13,9 @@ import maxminddb
 from flask import Flask, abort, jsonify, request, send_file
 
 from classify import (
+    FOLLOW_UP,
+    FOLLOW_UP_AFTER,
+    FOLLOW_UP_FROM,
     SSH_NO_NAME,
     SSH_PREFIX,
     SSH_REAL_ACCOUNT,
@@ -75,7 +78,10 @@ IGNORED_IPS = {"127.0.0.1", "::1", "150.136.117.66"}
 ASSET_RE = re.compile(
     r"\.(js|css|map|jpe?g|png|gif|svg|webp|ico|woff2?|ttf|mp3|m4a|wav|ogg)$", re.I
 )
-LINE_RE = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\] "([^"]*)" (\d{3}) ')
+LINE_RE = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\] "([^"]*)" (\d{3}) (?:\S+ "[^"]*" "([^"]*)")?')
+# Every row is stored as these columns, in this order.
+COLUMNS = ("ts, ip, location, path, status, method, user_agent, "
+           "category, after_what, result, hacking_me")
 
 SSH_LINE_RE = re.compile(r"^(\S+) \S+ sshd(?:-session)?\[\d+\]: (.*)$")
 # Made-up usernames are shown; attempts on real accounts never store the name.
@@ -139,11 +145,36 @@ def init_db():
         for column in ("category", "after_what", "result", "hacking_me"):
             if column not in existing:
                 db.execute(f"ALTER TABLE visits ADD COLUMN {column} TEXT")
+        # Kept out of public_visits: an agent string can identify a person.
+        for column in ("method", "user_agent"):
+            if column not in existing:
+                db.execute(f"ALTER TABLE visits ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+        db.execute("CREATE INDEX IF NOT EXISTS visits_ip ON visits (ip)")
 
 
-def labels(path, status, ip):
-    category, after_what = classify(path, status, ip)
+def labels(path, status, ip, method="", agent=""):
+    category, after_what = classify(path, status, ip, method, agent)
     return category, after_what, result_label(status), hacking_me(category)
+
+
+def apply_ip_context(db, ips=None):
+    """Mark the other requests of IPs seen attacking over the web as FOLLOW_UP.
+    With ips, only those IPs are checked, which keeps each ingest pass cheap."""
+    scope, args = "", []
+    if ips is not None:
+        ips = list(ips)
+        if not ips:
+            return
+        scope = f"AND ip IN ({','.join('?' * len(ips))})"
+        args = ips
+    marks = ",".join("?" * len(FOLLOW_UP_FROM))
+    db.execute(
+        f"UPDATE visits SET category = ?, after_what = ?, hacking_me = ? "
+        f"WHERE category IN ({marks}) {scope} AND ip IN ("
+        f"SELECT ip FROM visits WHERE hacking_me = 'Yes' AND status != ? AND category != ? {scope})",
+        [FOLLOW_UP, FOLLOW_UP_AFTER, hacking_me(FOLLOW_UP), *FOLLOW_UP_FROM, *args,
+         SSH_STATUS, FOLLOW_UP, *args],
+    )
 
 
 def relabel(db):
@@ -152,11 +183,12 @@ def relabel(db):
     row = db.execute("SELECT value FROM meta WHERE key = 'rules'").fetchone()
     if row and row["value"] == version:
         return
-    rows = db.execute("SELECT id, path, status, ip FROM visits").fetchall()
+    rows = db.execute("SELECT id, path, status, ip, method, user_agent FROM visits").fetchall()
     db.executemany(
         "UPDATE visits SET category = ?, after_what = ?, result = ?, hacking_me = ? WHERE id = ?",
-        [(*labels(r["path"], r["status"], r["ip"]), r["id"]) for r in rows],
+        [(*labels(r["path"], r["status"], r["ip"], r["method"], r["user_agent"]), r["id"]) for r in rows],
     )
+    apply_ip_context(db)
     db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('rules', ?)", (version,))
 
 
@@ -179,7 +211,7 @@ def parse(line):
     m = LINE_RE.match(line)
     if not m:
         return None
-    ip, stamp, req, status = m.groups()
+    ip, stamp, req, status, agent = m.groups()
     if ip in IGNORED_IPS:
         return None
     fields = req.split(" ")
@@ -187,14 +219,17 @@ def parse(line):
     if ASSET_RE.search(path.split("?")[0]) or path.startswith(("/www-traffic", "/whos-hacking-me")):
         return None
     ts = datetime.strptime(stamp, "%d/%b/%Y:%H:%M:%S %z").astimezone(timezone.utc)
+    method = fields[0][:16] if len(fields) >= 2 else ""
+    # nginx writes "-" for a missing agent; "" means the line had no agent field at all.
+    agent = "" if agent is None else agent[:300]
     path, status = path[:300], int(status)
-    return (ts.isoformat(), ip, locate(ip), path, status, *labels(path, status, ip))
+    return (ts.isoformat(), ip, locate(ip), path, status, method, agent,
+            *labels(path, status, ip, method, agent))
 
 
 def add_visits(db, rows):
     db.executemany(
-        "INSERT INTO visits (ts, ip, location, path, status, category, after_what, result, hacking_me) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        f"INSERT INTO visits ({COLUMNS}) VALUES ({','.join('?' * len(COLUMNS.split(',')))})",
         rows,
     )
 
@@ -206,6 +241,45 @@ def store(db, lines):
         if row:
             rows.append(row)
     add_visits(db, rows)
+    apply_ip_context(db, {r[1] for r in rows})
+
+
+def logged_agents(lines):
+    """Map (ts, ip, path, status) to (method, agent) for one access log's lines."""
+    found = {}
+    for line in lines:
+        row = parse(line)
+        if row and row[6]:
+            found[(row[0], row[1], row[3], row[4])] = (row[5], row[6])
+    return found
+
+
+def backfill_agents(db):
+    """Once: fill in method and agent for stored rows that nginx still has logs for.
+    Older rows keep blank values and are classified as before."""
+    if db.execute("SELECT 1 FROM meta WHERE key = 'agents_backfilled'").fetchone():
+        return
+    found = {}
+    for path in sorted(glob.glob(LOG + ".*.gz")):
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
+            found.update(logged_agents(f))
+    for path in (LOG + ".1", LOG):
+        if os.path.exists(path):
+            found.update(logged_agents(read_from(path, 0)[0]))
+    if found:
+        oldest = min(k[0] for k in found)
+        rows = db.execute(
+            "SELECT id, ts, ip, path, status FROM visits WHERE ts >= ? AND status != ? AND user_agent = ''",
+            (oldest, SSH_STATUS),
+        ).fetchall()
+        db.executemany(
+            "UPDATE visits SET method = ?, user_agent = ? WHERE id = ?",
+            [(*found[key], r["id"]) for r in rows
+             if (key := (r["ts"], r["ip"], r["path"], r["status"])) in found],
+        )
+    # Rules must run again over the newly filled rows.
+    db.execute("DELETE FROM meta WHERE key = 'rules'")
+    db.execute("INSERT INTO meta (key, value) VALUES ('agents_backfilled', '1')")
 
 
 def read_from(path, pos):
@@ -286,15 +360,14 @@ def store_ssh(db, lines):
         ts = datetime.fromisoformat(stamp).astimezone(timezone.utc).replace(microsecond=0)
         path = SSH_PREFIX + name
         rows.append(
-            (ts.isoformat(), ip, locate(ip), path, SSH_STATUS, *labels(path, SSH_STATUS, ip))
+            (ts.isoformat(), ip, locate(ip), path, SSH_STATUS, "", "", *labels(path, SSH_STATUS, ip))
         )
     add_visits(db, rows)
 
 
 def sort_by_time(db):
     """Renumber rows oldest-first, since imported history arrives out of order."""
-    columns = "ts, ip, location, path, status, category, after_what, result, hacking_me"
-    rows = [tuple(r) for r in db.execute(f"SELECT {columns} FROM visits ORDER BY ts, id")]
+    rows = [tuple(r) for r in db.execute(f"SELECT {COLUMNS} FROM visits ORDER BY ts, id")]
     db.execute("DELETE FROM visits")
     add_visits(db, rows)
 
@@ -363,6 +436,7 @@ def follow():
     last_trim = 0
     try:
         with connect() as db:
+            backfill_agents(db)
             relabel(db)
     except Exception as exc:
         app.logger.exception("relabel failed: %s", exc)
@@ -548,11 +622,12 @@ def chart_data(db, since, names_before, now, step):
     ).fetchall()
     how = [{"label": SSH_LABEL if r["ssh"] else WEB_LABEL, "count": r["count"]} for r in routes]
 
+    # Kinds of attack only: a scanner's follow-up requests aren't a kind of attack.
     categories = db.execute(
         "SELECT category AS label, COUNT(*) AS count FROM public_visits "
-        "WHERE hacking_me = 'Yes' AND status != ? AND ts >= ? "
+        "WHERE hacking_me = 'Yes' AND status != ? AND category != ? AND ts >= ? "
         "GROUP BY category ORDER BY count DESC, label",
-        (SSH_STATUS, since),
+        (SSH_STATUS, FOLLOW_UP, since),
     ).fetchall()
     slices = [dict(r) for r in categories[:TOP_CATEGORIES]]
     rest = sum(r["count"] for r in categories[TOP_CATEGORIES:])
