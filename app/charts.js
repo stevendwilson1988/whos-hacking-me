@@ -145,11 +145,38 @@
 
   const share = (count, total) => (count / total * 100).toFixed(1) + "%";
 
+  // Network names come from the ASN database; they are only ever set as text.
+  function drawAsns(a) {
+    const cell = (cls, ...kids) => {
+      const td = document.createElement("td");
+      if (cls) td.className = cls;
+      td.append(...kids);
+      return td;
+    };
+    const rows = a.rows.map((r, i) => {
+      const tr = document.createElement("tr");
+      const link = Object.assign(document.createElement("a"), {
+        href: "https://bgp.tools/as/" + Number(r.asn), textContent: "AS" + Number(r.asn),
+        target: "_blank", rel: "noopener noreferrer"
+      });
+      link.title = r.org;
+      tr.append(cell("rank", String(i + 1)), cell("net", link, short(r.org || "")),
+        cell("n", num(r.ips)), cell("n", num(r.attempts)));
+      return tr;
+    });
+    $("asn-table").replaceChildren(...rows);
+    setCaption("asn-total", a.rows.length
+      ? ["Unique attacker IPs in this period: " + num(a.total_ips) + ", across " + num(a.networks) + " networks",
+         "Mostly rented cloud servers and VPNs, not home connections."]
+      : ["No attacks in this period."]);
+  }
+
   function show(d) {
+    drawAsns(d.asns);
     const how = d.how, cats = d.categories, names = d.usernames, places = d.countries;
     draw(howChart, how.slices, how.slices.map(s => ROUTE_COLORS[s.label]), $("chart-how"), "SSH and web attempts.");
     draw(catsChart, cats.slices, cats.slices.map(s => CATEGORY_COLORS[s.label] || OTHER), $("chart-cats"), "Web attempts by category.");
-    draw(namesChart, names.slices, nameColors(names.slices.map(s => s.label)), $("chart-names"), "Fake names they use to log into scratchbuild.net.");
+    draw(namesChart, names.slices, nameColors(names.slices.map(s => s.label)), $("chart-names"), "Fake names they use to ssh into scratchbuild.net.");
     drawTimeline(d.timeline);
     draw(placesChart, places.slices, placeColors(places.slices.map(s => s.label)), $("chart-places"), "Attempts by country.");
     setCaption("how-total", how.total

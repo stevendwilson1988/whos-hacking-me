@@ -25,11 +25,126 @@
     for (const [cls, text] of cells) {
       const td = document.createElement("td");
       if (cls) td.className = cls;
-      td.textContent = text;
+      if (cls === "ip" && v.hacking_me === "Yes" && text !== "Hidden") {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "ip-link";
+        btn.textContent = text;
+        btn.setAttribute("aria-label", "Profile of " + text);
+        btn.onclick = () => openProfile(text);
+        td.appendChild(btn);
+      } else {
+        td.textContent = text;
+      }
       tr.appendChild(td);
     }
     return tr;
   }
+
+  /* ---------- Attacker profile ----------
+     Every value comes from attackers or public registries, so it is only ever set as text. */
+  const profile = $("profile"), profileBody = $("profile-body");
+  let profileToken = 0;
+
+  const dayTime = iso => iso ? when(iso) : "unknown";
+  const plural = (n, word) => n.toLocaleString() + " " + word + (n === 1 ? "" : "s");
+
+  function section(title, ...kids) {
+    return el("section", {}, el("h3", { textContent: title }), ...kids);
+  }
+
+  function facts(pairs) {
+    const dl = el("dl");
+    for (const [term, value] of pairs) {
+      if (value === "" || value === null || value === undefined) continue;
+      dl.append(el("dt", { textContent: term }), el("dd", {}, value));
+    }
+    return dl;
+  }
+
+  function chips(values, link) {
+    if (!values || !values.length) return "none listed";
+    const box = el("span", { className: "chips" });
+    for (const v of values) {
+      box.append(link
+        ? el("a", { href: link(v), textContent: v, target: "_blank", rel: "noopener noreferrer" })
+        : el("span", { textContent: String(v) }));
+    }
+    return box;
+  }
+
+  function counted(rows) {
+    const ol = el("ol", { className: "counted" });
+    for (const r of rows) ol.append(el("li", {}, el("span", { textContent: r.value }), el("small", { textContent: r.n.toLocaleString() })));
+    return ol;
+  }
+
+  function renderProfile(d) {
+    const a = d.attempts, x = d.lookups;
+    const parts = [
+      el("p", { className: "caveat", textContent: "An IP address is not a person. Many attacks come from hijacked devices, rented cloud servers or VPNs, so this shows the network, not who is behind it." }),
+      section("What it did here",
+        facts([
+          ["Attempts", plural(a.total, "attempt") + " (" + a.ssh.toLocaleString() + " SSH, " + a.web.toLocaleString() + " web)"],
+          ["First seen", dayTime(a.first_seen)],
+          ["Last seen", dayTime(a.last_seen)],
+          ["Guessed location", d.location],
+        ]),
+        a.categories.length ? el("p", { className: "sub", textContent: "Kinds of attack" }) : "",
+        a.categories.length ? counted(a.categories) : "",
+        a.paths.length ? el("p", { className: "sub", textContent: "Pages it asked for most" }) : "",
+        a.paths.length ? counted(a.paths) : ""),
+    ];
+    if (!x) {
+      parts.push(el("p", { className: "note", textContent: "Public records for this IP haven't been looked up yet. They are fetched in the background, usually within a few minutes. Check back soon." }));
+    } else {
+      const reg = x.registry || {}, sh = x.shodan || {};
+      const asn = x.asn ? el("a", { href: "https://bgp.tools/as/" + Number(x.asn), textContent: "AS" + Number(x.asn), target: "_blank", rel: "noopener noreferrer" }) : "";
+      parts.push(section("Who runs the network",
+        facts([
+          ["Network (ASN)", x.asn ? el("span", {}, asn, " " + (x.as_org || "")) : "unknown"],
+          ["Registered to", reg.org],
+          ["Network name", reg.name],
+          ["Address range", reg.range],
+          ["Registry country", reg.country],
+          ["Reverse DNS", x.ptr || "none"],
+          ["Tor exit node", x.tor ? "Yes" : "No"],
+        ]),
+        reg.abuse ? el("p", {}, el("a", {
+          className: "report",
+          href: "mailto:" + reg.abuse + "?subject=" + encodeURIComponent("Abuse report: attacks from " + d.ip),
+          textContent: "Report abuse to " + reg.abuse,
+        })) : ""));
+      parts.push(section("What Shodan has seen on it",
+        facts([
+          ["Open ports", chips(sh.ports)],
+          ["Tags", chips(sh.tags)],
+          ["Hostnames", chips(sh.hostnames)],
+          ["Known vulnerabilities", chips(sh.vulns, id => "https://nvd.nist.gov/vuln/detail/" + encodeURIComponent(id))],
+        ])));
+      const failed = x.failed.length ? " Couldn't reach: " + x.failed.join(", ") + "; will retry." : "";
+      parts.push(el("p", { className: "note", textContent: "Public records checked " + dayTime(x.checked_at) + "." + failed }));
+    }
+    profileBody.replaceChildren(...parts.filter(Boolean));
+  }
+
+  async function openProfile(ip) {
+    const mine = ++profileToken;
+    $("profile-title").textContent = ip;
+    profileBody.replaceChildren(el("p", { className: "note", textContent: "Loading…" }));
+    if (!profile.open) profile.showModal();
+    try {
+      const res = await fetch("/whos-hacking-me/api/ip/" + encodeURIComponent(ip), { cache: "no-store" });
+      if (!res.ok) throw new Error(res.status);
+      const d = await res.json();
+      if (mine === profileToken) renderProfile(d);
+    } catch (e) {
+      if (mine === profileToken) profileBody.replaceChildren(el("p", { className: "note", textContent: "Couldn't load this profile. Try again in a moment." }));
+    }
+  }
+
+  $("profile-close").addEventListener("click", () => profile.close());
+  profile.addEventListener("click", e => { if (e.target === profile) profile.close(); });
 
   const isActive = f => !(f.mode === "not" && f.values.size === 0);
 

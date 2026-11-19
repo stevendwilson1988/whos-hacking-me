@@ -28,6 +28,7 @@ fi
 echo "Running tests..."
 python3 "$DEST/test_classify.py"
 python3 "$DEST/test_charts.py"
+python3 "$DEST/test_intel.py"
 
 echo "Restarting www-traffic..."
 sudo systemctl restart www-traffic

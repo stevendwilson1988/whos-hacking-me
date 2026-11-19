@@ -134,6 +134,31 @@ def main():
         allt = client.get("/whos-hacking-me/api/charts?window=all").get_json()
         check("all time keeps older rows", "oldname" in [s["label"] for s in allt["usernames"]["slices"]])
 
+        week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).replace(microsecond=0).isoformat()
+        with app.connect() as db:
+            yes_ips = db.execute("SELECT COUNT(DISTINCT ip) FROM public_visits WHERE hacking_me = 'Yes' "
+                                 "AND ts >= ?", (week_ago,)).fetchone()[0]
+        for label, data in (("24h", day), ("7d", seven), ("all", allt)):
+            a = data["asns"]
+            check(f"networks {label} is at most 10 rows sorted by IPs",
+                  len(a["rows"]) <= 10 and [r["ips"] for r in a["rows"]] == sorted((r["ips"] for r in a["rows"]), reverse=True))
+            check(f"networks {label} rows fit inside the IP total", sum(r["ips"] for r in a["rows"]) <= a["total_ips"])
+        check("networks count only attacker IPs, not the owner's", seven["asns"]["total_ips"] == yes_ips
+              and OWN_IP not in json.dumps(seven["asns"]))
+        real_lookup = app.intel.lookup_asn
+        app.intel.lookup_asn = lambda ip: (None, "") if ip == "45.2.2.2" else (64500, "Test Net")
+        saved_cache = dict(app.chart_cache)
+        try:
+            app.chart_cache.clear()
+            odd = client.get("/whos-hacking-me/api/charts?window=7d").get_json()["asns"]
+        finally:
+            app.intel.lookup_asn = real_lookup
+            app.chart_cache.clear()
+            app.chart_cache.update(saved_cache)
+        check("an IP with no network counts in the total but gets no row",
+              odd["total_ips"] == yes_ips and odd["rows"] == [{"asn": 64500, "org": "Test Net", "ips": yes_ips - 1,
+                                                              "attempts": odd["rows"][0]["attempts"]}])
+
         check("usernames tried counts only fake names older than an hour", names["names_tried"] == 15)
 
         rows = post("visits", {"limit": 1000, "counts": True})

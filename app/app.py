@@ -1,6 +1,7 @@
 import gzip
 import glob
 import hashlib
+import ipaddress
 import os
 import re
 import sqlite3
@@ -12,6 +13,7 @@ from pathlib import Path
 import maxminddb
 from flask import Flask, abort, jsonify, request, send_file
 
+import intel
 from classify import (
     FOLLOW_UP,
     FOLLOW_UP_AFTER,
@@ -55,6 +57,7 @@ CHART_CACHE_SECONDS = 60
 TOP_CATEGORIES = 6
 TOP_USERNAMES = 8
 TOP_COUNTRIES = 6
+TOP_NETWORKS = 10
 USERNAME_DELAY = timedelta(hours=1)
 SSH_LABEL = "SSH"
 WEB_LABEL = "Web (HTTP)"
@@ -150,6 +153,7 @@ def init_db():
             if column not in existing:
                 db.execute(f"ALTER TABLE visits ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
         db.execute("CREATE INDEX IF NOT EXISTS visits_ip ON visits (ip)")
+        db.execute(intel.SCHEMA)
 
 
 def labels(path, status, ip, method="", agent=""):
@@ -430,6 +434,7 @@ def trim(db):
     ).fetchone()
     if cutoff:
         db.execute("DELETE FROM visits WHERE id < ?", (cutoff["id"],))
+        intel.prune(db)
 
 
 def follow():
@@ -680,7 +685,22 @@ def chart_data(db, since, names_before, now, step):
     other = all_attempts - sum(r["count"] for r in top)
     if other:
         username_slices.append({"label": "Other", "count": other})
+    # Networks by unique attacker IPs, from the local ASN file (no outside calls).
+    networks = {}
+    attacker_ips = db.execute(
+        "SELECT ip, COUNT(*) AS n FROM public_visits WHERE hacking_me = 'Yes' AND ts >= ? GROUP BY ip",
+        (since,),
+    ).fetchall()
+    for r in attacker_ips:
+        number, org = intel.lookup_asn(r["ip"])
+        if number is None:
+            continue
+        entry = networks.setdefault(number, {"asn": number, "org": org, "ips": 0, "attempts": 0})
+        entry["ips"] += 1
+        entry["attempts"] += r["n"]
+    asn_rows = sorted(networks.values(), key=lambda e: (-e["ips"], -e["attempts"], e["asn"]))
     return {
+        "asns": {"rows": asn_rows[:TOP_NETWORKS], "total_ips": len(attacker_ips), "networks": len(networks)},
         "how": {"slices": how, "total": sum(r["count"] for r in routes)},
         "categories": {"slices": slices, "total": sum(r["count"] for r in categories)},
         "timeline": timeline(db, since, now, step),
@@ -717,5 +737,51 @@ def charts():
     return jsonify(data)
 
 
+TOP_PROFILE = 5
+
+
+@app.route("/whos-hacking-me/api/ip/<address>")
+def ip_profile(address):
+    """An attacker's profile: what our logs show plus the cached public lookups.
+    Only IPs the table already shows (a Yes row) have one, so this reveals no one else."""
+    try:
+        ip = str(ipaddress.ip_address(address))
+    except ValueError:
+        abort(404)
+    # Same rows public_visits shows with this IP, but through the ip index.
+    mine = "FROM visits WHERE ip = ? AND hacking_me = 'Yes' AND ip NOT IN (SELECT ip FROM ssh_own_ips)"
+    with connect() as db:
+        stats = db.execute(
+            f"SELECT COUNT(*) AS total, MIN(ts) AS first_seen, MAX(ts) AS last_seen, "
+            f"SUM(status = ?) AS ssh {mine}",
+            (SSH_STATUS, ip),
+        ).fetchone()
+        if not stats["total"]:
+            abort(404)
+        categories = db.execute(
+            f"SELECT category AS value, COUNT(*) AS n {mine} GROUP BY category ORDER BY n DESC LIMIT ?",
+            (ip, TOP_PROFILE),
+        ).fetchall()
+        paths = db.execute(
+            f"SELECT path AS value, COUNT(*) AS n {mine} AND status != ? "
+            f"GROUP BY path ORDER BY n DESC LIMIT ?",
+            (ip, SSH_STATUS, TOP_PROFILE),
+        ).fetchall()
+        lookups = intel.load(db, ip)
+    response = jsonify(
+        ip=ip,
+        location=locate(ip),
+        attempts={
+            "total": stats["total"], "ssh": stats["ssh"] or 0, "web": stats["total"] - (stats["ssh"] or 0),
+            "first_seen": stats["first_seen"], "last_seen": stats["last_seen"],
+            "categories": [dict(r) for r in categories], "paths": [dict(r) for r in paths],
+        },
+        lookups=lookups,
+    )
+    response.headers["Cache-Control"] = "public, max-age=60"
+    return response
+
+
 init_db()
 threading.Thread(target=follow, daemon=True).start()
+threading.Thread(target=intel.worker, args=(connect,), daemon=True).start()

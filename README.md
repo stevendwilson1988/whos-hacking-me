@@ -9,10 +9,12 @@ server, with charts. It flags requests and failed SSH logins that look like hack
 |---|---|
 | `app/app.py` | Flask app. Reads the nginx access log and `/var/log/auth.log`, stores rows in SQLite, and serves the page plus the `/api/visits`, `/api/facets` and chart APIs |
 | `app/classify.py` | Rules that decide "Hacking Me: Yes/No" |
+| `app/intel.py` | Attacker profiles: passive lookups (ASN, reverse DNS, RDAP, Shodan InternetDB, Tor exit list) run by a background thread and cached in the `ip_intel` table; served by `/api/ip/<ip>` |
 | `app/page.html`, `app/page.js` | The page and its live-updating table |
 | `app/charts.js`, `app/chart.umd.js` | Charts (Chart.js is vendored, see `chart.LICENSE.md`) |
 | `app/test_charts.py` | Tests. They use a throwaway database but load `app.py` from `/opt/www-traffic` |
 | `app/test_classify.py` | Tests for the rules in `classify.py`, using real paths from the log |
+| `app/test_intel.py` | Tests for profile parsing, the lookup queue and the `/api/ip` privacy gate (no network) |
 | `deploy/www-traffic.service` | systemd unit (`/etc/systemd/system/`) |
 | `deploy/nginx-limit.conf` | Rate limit zone (`/etc/nginx/conf.d/whos-hacking-me-limit.conf`) |
 | `deploy/nginx-locations.conf` | Reference copy of the location blocks in `/etc/nginx/sites-available/default` |
@@ -25,6 +27,13 @@ server, with charts. It flags requests and failed SSH logins that look like hack
 - These files stay on the server and are not in git:
   - `traffic.db` (the live data)
   - `dbip-city-lite.mmdb` (the 127 MB GeoIP database from https://db-ip.com)
+  - `dbip-asn-lite.mmdb` (the ASN database, from https://download.db-ip.com/free/dbip-asn-lite-YYYY-MM.mmdb.gz). Without it, profiles show the ASN as unknown
+
+## Attacker profiles
+
+Clicking an attacker's IP opens a profile. Only IPs with a "Yes" row have one, and the API returns 404 for any other IP.
+The worker looks up about one IP a second: new attackers first, then profiles older than 7 days, then failed ones after an hour.
+Every lookup goes to a public registry or database. Nothing is ever sent to the attacker's own machine.
 
 ## Making a change
 

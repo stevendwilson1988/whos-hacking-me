@@ -121,10 +121,18 @@
   .chart { margin: 0; min-width: 0; display: grid; gap: 0.6rem; align-content: start; padding: 1rem; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
   .chart h2 { margin: 0; font: 700 1.05rem/1.3 var(--display); }
   .canvas-wrap { position: relative; height: 340px; min-width: 0; }
-  /* Two columns wide wherever the grid has two or more (2 x 320px + gap + page padding). */
-  @media (min-width: 688px) { .chart.wide { grid-column: span 2; } }
   .chart figcaption { display: grid; gap: 0.15rem; color: var(--muted); font-size: 0.9rem; }
   .chart figcaption span:first-child { color: var(--ink); font-weight: 600; }
+  /* Wide screens always show the six cards as two rows of three. */
+  @media (min-width: 1040px) { .chart-grid { grid-template-columns: repeat(3, 1fr); } }
+  .table-wrap { height: 340px; overflow: auto; min-width: 0; }
+  .asn-table { font-size: 0.88rem; }
+  .asn-table th, .asn-table td { padding: 0.38rem 0.5rem; }
+  .asn-table th { font-size: 0.72rem; }
+  .asn-table .n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .asn-table .rank { color: var(--muted); width: 1.5rem; }
+  .asn-table .net { overflow-wrap: anywhere; }
+  .asn-table .net a { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 0.35rem; }
   .empty { padding: 2rem; text-align: center; color: var(--muted); }
   button {
     justify-self: center;
@@ -139,6 +147,42 @@
   button:hover { border-color: var(--muted); }
   button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   footer { color: var(--muted); font-size: 0.82rem; }
+  .ip-link {
+    font: inherit; font-variant-numeric: tabular-nums; color: var(--yes);
+    background: none; border: 0; border-radius: 4px; padding: 0;
+    text-decoration: underline dotted; text-underline-offset: 3px;
+  }
+  .ip-link:hover { color: var(--ink); text-decoration-style: solid; }
+  #profile {
+    width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 48px);
+    padding: 0; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--muted); border-radius: 12px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+  }
+  #profile::backdrop { background: rgba(4, 10, 22, 0.7); }
+  #profile .head {
+    position: sticky; top: 0; display: flex; align-items: center; gap: 1rem;
+    padding: 1rem 1.2rem; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  #profile h2 { margin: 0; flex: 1; font: 700 1.2rem/1.3 var(--display); overflow-wrap: anywhere; }
+  #profile h2 small { display: block; color: var(--muted); font: 600 0.75rem var(--body); letter-spacing: 0.06em; text-transform: uppercase; }
+  #profile-close { padding: 0.3rem 0.9rem; }
+  #profile-body { display: grid; gap: 1.2rem; padding: 1.1rem 1.2rem 1.4rem; }
+  #profile h3 { margin: 0 0 0.5rem; font: 700 1rem/1.3 var(--display); }
+  #profile dl { display: grid; grid-template-columns: minmax(110px, auto) 1fr; gap: 0.35rem 1rem; margin: 0; font-size: 0.92rem; }
+  #profile dt { color: var(--muted); }
+  #profile dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  #profile .chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+  #profile .chips > * { padding: 0.05rem 0.5rem; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); font-size: 0.85rem; }
+  #profile .sub { margin: 0.8rem 0 0.3rem; color: var(--muted); font-size: 0.85rem; }
+  #profile .counted { margin: 0; padding: 0; list-style: none; display: grid; gap: 0.2rem; font-size: 0.9rem; }
+  #profile .counted li { display: flex; gap: 0.8rem; justify-content: space-between; }
+  #profile .counted span { min-width: 0; overflow-wrap: anywhere; }
+  #profile .counted small { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #profile .caveat { margin: 0; padding: 0.6rem 0.8rem; border-left: 3px solid var(--maybe); background: var(--panel); font-size: 0.9rem; }
+  #profile .note { margin: 0; color: var(--muted); font-size: 0.85rem; }
+  #profile .report { color: var(--accent); font-weight: 600; }
+  @media (max-width: 480px) { #profile dl { grid-template-columns: 1fr; } #profile dd { margin-bottom: 0.4rem; } }
   @media (prefers-reduced-motion: reduce) { tr.fresh { animation: none; } }
 </style>
 </head>
@@ -161,13 +205,23 @@
         <figcaption id="how-total"></figcaption>
       </figure>
       <figure class="chart">
+        <h2>Networks attacks come from</h2>
+        <div class="table-wrap">
+          <table class="asn-table" aria-describedby="asn-total">
+            <thead><tr><th class="rank" scope="col">#</th><th scope="col">Network</th><th class="n" scope="col">IPs</th><th class="n" scope="col">Attempts</th></tr></thead>
+            <tbody id="asn-table"></tbody>
+          </table>
+        </div>
+        <figcaption id="asn-total"></figcaption>
+      </figure>
+      <figure class="chart">
         <h2>What they're trying over http</h2>
         <div class="canvas-wrap"><canvas id="chart-cats" role="img" aria-label="Web attempts by category"></canvas></div>
         <figcaption id="cats-total"></figcaption>
       </figure>
       <figure class="chart">
-        <h2>Fake names they use to log into scratchbuild.net</h2>
-        <div class="canvas-wrap"><canvas id="chart-names" role="img" aria-label="Fake names they use to log into scratchbuild.net"></canvas></div>
+        <h2>Fake names they use to ssh into scratchbuild.net</h2>
+        <div class="canvas-wrap"><canvas id="chart-names" role="img" aria-label="Fake names they use to ssh into scratchbuild.net"></canvas></div>
         <figcaption id="names-total"></figcaption>
       </figure>
       <figure class="chart">
@@ -175,7 +229,7 @@
         <div class="canvas-wrap"><canvas id="chart-places" role="img" aria-label="Attempts by country"></canvas></div>
         <figcaption id="places-total"></figcaption>
       </figure>
-      <figure class="chart wide">
+      <figure class="chart">
         <h2>SSH vs. http attacks over time</h2>
         <div class="canvas-wrap"><canvas id="chart-time" role="img" aria-label="SSH and web attempts over time"></canvas></div>
         <figcaption id="time-total"></figcaption>
@@ -199,8 +253,17 @@
     <div class="empty" id="empty" hidden>No visits match these filters.</div>
   </div>
   <button id="older" type="button" hidden>Show older visits</button>
-  <footer>Times are in your own time zone. Locations are estimates from each IP address and can be wrong. Hacking Me is an automatic guess: Yes means it looks like an attempt, not that it worked. SSH rows are rejected logins to the server. Usernames are never shown in the table. To protect people's privacy, IP addresses and locations are only shown on rows marked Yes. <a href="https://db-ip.com">IP Geolocation by DB-IP</a>.</footer>
+  <footer>Times are in your own time zone. Locations are estimates from each IP address and can be wrong. Hacking Me is an automatic guess: Yes means it looks like an attempt, not that it worked. SSH rows are rejected logins to the server. Usernames are never shown in the table. To protect people's privacy, IP addresses and locations are only shown on rows marked Yes.
+    Click an attacker's IP address to see its profile. Profiles use only public records: the network's owner and abuse contact from the internet registries (RDAP), reverse DNS, the Tor exit list and <a href="https://internetdb.shodan.io">Shodan InternetDB</a>. Nothing is sent to the attacker's machine. <a href="https://db-ip.com">IP Geolocation and ASN data by DB-IP</a>.</footer>
 </div>
+
+<dialog id="profile" aria-labelledby="profile-title">
+  <div class="head">
+    <h2><small>Attacker profile</small><span id="profile-title"></span></h2>
+    <button id="profile-close" type="button">Close</button>
+  </div>
+  <div id="profile-body"></div>
+</dialog>
 
 <script src="/whos-hacking-me/page.js"></script>
 <script src="/whos-hacking-me/chart.umd.js"></script>
