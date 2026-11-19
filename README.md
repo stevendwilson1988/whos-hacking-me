@@ -14,6 +14,9 @@ server, with charts. It flags requests and failed SSH logins that look like hack
 | `app/charts.js`, `app/chart.umd.js` | Charts (Chart.js is vendored, see `chart.LICENSE.md`) |
 | `app/test_charts.py` | Tests. They use a throwaway database but load `app.py` from `/opt/www-traffic` |
 | `app/test_classify.py` | Tests for the rules in `classify.py`, using real paths from the log |
+| `app/alerts.py` | Email alerts: database at 80% of its cap, old visits deleted, low disk, logging stalled. Sent from Gmail via a systemd credential |
+| `app/test_alerts.py` | Tests for the storage limits and alerts (emails are captured, never sent) |
+| `deploy/alerts.env.example` | Template for `/etc/www-traffic/alerts.env` (alert addresses, `WHT_MAX_DB_GB`, `WHT_MIN_FREE_GB`) |
 | `app/test_intel.py` | Tests for profile parsing, the lookup queue and the `/api/ip` privacy gate (no network) |
 | `deploy/www-traffic.service` | systemd unit (`/etc/systemd/system/`) |
 | `deploy/nginx-limit.conf` | Rate limit zone (`/etc/nginx/conf.d/whos-hacking-me-limit.conf`) |
@@ -28,6 +31,15 @@ server, with charts. It flags requests and failed SSH logins that look like hack
   - `traffic.db` (the live data)
   - `dbip-city-lite.mmdb` (the 127 MB GeoIP database from https://db-ip.com)
   - `dbip-asn-lite.mmdb` (the ASN database, from https://download.db-ip.com/free/dbip-asn-lite-YYYY-MM.mmdb.gz). Without it, profiles show the ASN as unknown
+  - `/etc/www-traffic/alerts.env` and `/etc/www-traffic/smtp-password` (root-only; alert settings and the Gmail app password)
+
+## Storage and alerts
+
+- The database is capped at `WHT_MAX_DB_GB` (5 GiB). Past it, the oldest visits are deleted down to 90%.
+- If free disk drops below `WHT_MIN_FREE_GB` (5 GiB), the database is held at its current size: the oldest visits make room for new ones.
+- The write-ahead log shrinks back to 64 MB after checkpoints.
+- Each alert emails once when it starts and once when it clears. Changing the settings sends an "Alerts are set up" test email on restart.
+- To change a setting: `sudo nano /etc/www-traffic/alerts.env && sudo systemctl restart www-traffic`.
 
 ## Attacker profiles
 

@@ -140,8 +140,8 @@ def main():
                                  "AND ts >= ?", (week_ago,)).fetchone()[0]
         for label, data in (("24h", day), ("7d", seven), ("all", allt)):
             a = data["asns"]
-            check(f"networks {label} is at most 10 rows sorted by IPs",
-                  len(a["rows"]) <= 10 and [r["ips"] for r in a["rows"]] == sorted((r["ips"] for r in a["rows"]), reverse=True))
+            check(f"networks {label} is at most 5 rows sorted by IPs",
+                  len(a["rows"]) <= 5 and [r["ips"] for r in a["rows"]] == sorted((r["ips"] for r in a["rows"]), reverse=True))
             check(f"networks {label} rows fit inside the IP total", sum(r["ips"] for r in a["rows"]) <= a["total_ips"])
         check("networks count only attacker IPs, not the owner's", seven["asns"]["total_ips"] == yes_ips
               and OWN_IP not in json.dumps(seven["asns"]))

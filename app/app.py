@@ -4,6 +4,7 @@ import hashlib
 import ipaddress
 import os
 import re
+import shutil
 import sqlite3
 import threading
 import time
@@ -13,6 +14,7 @@ from pathlib import Path
 import maxminddb
 from flask import Flask, abort, jsonify, request, send_file
 
+import alerts
 import intel
 from classify import (
     FOLLOW_UP,
@@ -35,7 +37,12 @@ LOG = "/var/log/nginx/access.log"
 SSH_LOG = "/var/log/auth.log"
 
 # Past this size the oldest visits are deleted, down to TRIM_TO of the limit.
-MAX_DB_BYTES = 1024 ** 3
+# Both are set in /etc/www-traffic/alerts.env (see deploy/alerts.env.example).
+MAX_DB_BYTES = int(float(os.environ.get("WHT_MAX_DB_GB", "1")) * 1024 ** 3)
+# Below this much free disk, the database stops growing: old visits make room for new ones.
+MIN_FREE_BYTES = int(float(os.environ.get("WHT_MIN_FREE_GB", "5")) * 1024 ** 3)
+# The write-ahead log shrinks back to this after each checkpoint.
+WAL_LIMIT_BYTES = 64 * 1024 ** 2
 TRIM_TO = 0.9
 TRIM_EVERY = 60
 
@@ -57,7 +64,7 @@ CHART_CACHE_SECONDS = 60
 TOP_CATEGORIES = 6
 TOP_USERNAMES = 8
 TOP_COUNTRIES = 6
-TOP_NETWORKS = 10
+TOP_NETWORKS = 5
 USERNAME_DELAY = timedelta(hours=1)
 SSH_LABEL = "SSH"
 WEB_LABEL = "Web (HTTP)"
@@ -103,6 +110,7 @@ def connect():
     db = sqlite3.connect(DB_PATH, timeout=30)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
+    db.execute(f"PRAGMA journal_size_limit = {WAL_LIMIT_BYTES}")
     return db
 
 
@@ -423,18 +431,38 @@ def used_bytes(db):
     return (pages - free) * size
 
 
-def trim(db):
+def free_bytes():
+    return shutil.disk_usage(DB_PATH.parent).free
+
+
+def trim(db, free):
+    """Delete the oldest visits when the database passes its ceiling: the cap, or, while
+    disk is low, the size it had when disk got low. Deleted rows don't shrink the file,
+    but their space is reused, so the file stops growing."""
     used = used_bytes(db)
-    if used <= MAX_DB_BYTES:
-        return
+    ceiling, reason = MAX_DB_BYTES, "size cap reached"
+    if free < MIN_FREE_BYTES:
+        frozen = db.execute("SELECT value FROM meta WHERE key = 'disk_ceiling'").fetchone()
+        if frozen is None:
+            frozen = (used,)
+            db.execute("INSERT INTO meta (key, value) VALUES ('disk_ceiling', ?)", (str(used),))
+        if int(frozen[0]) < ceiling:
+            ceiling, reason = int(frozen[0]), "low disk space"
+    else:
+        db.execute("DELETE FROM meta WHERE key = 'disk_ceiling'")
+    if used <= ceiling:
+        return {"deleted": 0, "reason": None}
     count = db.execute("SELECT COUNT(*) FROM visits").fetchone()[0]
-    remove = int(count * (1 - TRIM_TO * MAX_DB_BYTES / used)) + 1
+    remove = int(count * (1 - TRIM_TO * ceiling / used)) + 1
     cutoff = db.execute(
         "SELECT id FROM visits ORDER BY id LIMIT 1 OFFSET ?", (remove,)
     ).fetchone()
-    if cutoff:
-        db.execute("DELETE FROM visits WHERE id < ?", (cutoff["id"],))
-        intel.prune(db)
+    if not cutoff:
+        return {"deleted": 0, "reason": None}
+    deleted = db.execute("DELETE FROM visits WHERE id < ?", (cutoff["id"],)).rowcount
+    intel.prune(db)
+    app.logger.warning("trim: deleted %d oldest visits (%s)", deleted, reason)
+    return {"deleted": deleted, "reason": reason}
 
 
 def follow():
@@ -445,16 +473,32 @@ def follow():
             relabel(db)
     except Exception as exc:
         app.logger.exception("relabel failed: %s", exc)
+    try:
+        with connect() as db:
+            alerts.hello(db, MAX_DB_BYTES, MIN_FREE_BYTES)
+    except Exception as exc:
+        app.logger.exception("alert setup failed: %s", exc)
+    last_ok = time.time()
     while True:
         try:
             with connect() as db:
                 ingest(db)
                 ingest_ssh(db)
-                if time.time() - last_trim >= TRIM_EVERY:
-                    trim(db)
-                    last_trim = time.time()
+            last_ok = time.time()
         except Exception as exc:
             app.logger.exception("ingest failed: %s", exc)
+        # Kept apart from ingest, so a broken log read still gets noticed and emailed.
+        if time.time() - last_trim >= TRIM_EVERY:
+            last_trim = time.time()
+            try:
+                with connect() as db:
+                    free = free_bytes()
+                    trimmed = trim(db, free)
+                    stalled = int(time.time() - last_ok) if time.time() - last_ok > 30 else 0
+                    alerts.check(db, used=used_bytes(db), cap=MAX_DB_BYTES, free=free,
+                                 floor=MIN_FREE_BYTES, trimmed=trimmed, stalled=stalled)
+            except Exception as exc:
+                app.logger.exception("trim or alert check failed: %s", exc)
         time.sleep(2)
 
 
