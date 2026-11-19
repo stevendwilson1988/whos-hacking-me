@@ -198,7 +198,7 @@
     return res.json();
   }
 
-  let current = "7d", request = 0;
+  let current = "all", request = 0;
   async function load() {
     const mine = ++request;
     try {
