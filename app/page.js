@@ -430,4 +430,8 @@
 
   reload();
   setInterval(() => { if (!document.hidden) poll(); }, POLL_MS);
+
+  // Deep link from AI CVE Watch: /whos-hacking-me/?ip=1.2.3.4 opens that attacker's profile.
+  const linked = new URLSearchParams(location.search).get("ip");
+  if (linked && /^[0-9A-Fa-f:.]{3,45}$/.test(linked)) openProfile(linked);
 })();
